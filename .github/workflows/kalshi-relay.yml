@@ -1,0 +1,28 @@
+name: Kalshi Investor Pulse -> Slack
+
+# Manual trigger only for now — hit "Run workflow" in the Actions tab to test.
+# (Add a `schedule:` block here later if you want it to post automatically.)
+on:
+  workflow_dispatch: {}
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Pull Kalshi data and post to Slack
+        env:
+          SLACK_RELAY_TOKEN: ${{ secrets.SLACK_RELAY_TOKEN }}
+          SLACK_CHANNEL_ID:  ${{ secrets.SLACK_CHANNEL_ID }}
+        run: python3 slack_relay.py --channel "$SLACK_CHANNEL_ID" --send

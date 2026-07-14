@@ -1,1 +1,2 @@
-# No third-party dependencies — Python standard library only.
+# Runtime dependency for the Kalshi API pull + Slack relay POST.
+requests>=2.31
