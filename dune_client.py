@@ -73,14 +73,12 @@ def _first_number(row):
 # The big cumulative/OI/volume panels are private (API returns 404), so they're
 # intentionally omitted here. See ALL_QUERIES below to re-probe what's public.
 SCALARS = [
-    (6320047, "Avg trade size",   "$"),
+    (6320047, "Avg trade size",    "$"),
     (6320060, "Median trade size", "$"),
 ]
 TABLES = [
-    (6219404, "Top markets \u2014 24h volume",    "$", 5),
     (6219452, "Top markets \u2014 7d volume",     "$", 5),
     (6219464, "Top markets \u2014 24h OI change", "$", 5),
-    (6219494, "Top markets \u2014 7d OI change",  "$", 5),
 ]
 
 # Every panel on dune.com/kalshi/kalshi, for re-probing public vs private.
