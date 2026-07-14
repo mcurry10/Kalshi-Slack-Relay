@@ -5,15 +5,15 @@ Reports, from Kalshi's PUBLIC market-data API (no auth):
   - Platform pulse: open events/markets, open interest, 24h volume, top categories.
   - WoW / MoM volume: exact contract volume over the trailing ~7d and ~30d,
     computed by diffing this run's lifetime volume against stored snapshots.
-    History accrues in a small JSON file (persisted via the Actions cache),
-    so WoW appears after ~1 week of runs and MoM after ~1 month.
   - Block trades: institutional block-trade share of taker $ volume, sampled
-    over a bounded recent window (a full week/month of trades is not scannable).
+    over a bounded recent window.
+Optionally appends full-history parity metrics pulled from the public Kalshi
+Dune dashboard (dune.com/kalshi/kalshi) when DUNE_API_KEY is set.
 
 SAFETY / DESIGN:
-  - Relay auth token read from env SLACK_RELAY_TOKEN; never hardcoded. No token -> refuse to send.
-  - Dry run by default: prints the payload it WOULD post. Actual POST only with `--send`.
-  - Destination channel is a required CLI arg; no channel is baked in.
+  - Relay token read from env SLACK_RELAY_TOKEN; never hardcoded. No token -> refuse to send.
+  - Dry run by default; actual POST only with `--send`.
+  - Destination channel is a required CLI arg.
 
 Usage:
   python3 slack_relay.py --channel C0XXXXXXX                       # dry run
@@ -126,7 +126,6 @@ def nearest(snaps, now_ts, target_days, min_days, max_days):
 
 
 def volume_windows(cur, snaps):
-    """Return trailing-7d/30d contract volume and, where history allows, WoW/MoM % change."""
     now = cur["ts"]
     s7 = nearest(snaps, now, 7, 5, 10)
     s14 = nearest(snaps, now, 14, 12, 18)
@@ -149,7 +148,7 @@ def volume_windows(cur, snaps):
 
 
 # ---------- message ----------
-def build_message(cur, cats, win, block):
+def build_message(cur, cats, win, block, dune_lines=None):
     tot24 = cur["vol24"] or 1
     tot_oi = cur["oi"] or 1
     top = sorted(cats.items(), key=lambda kv: -kv[1]["vol24"])[:5]
@@ -178,6 +177,8 @@ def build_message(cur, cats, win, block):
     L += ["", "*Top categories by 24h volume:*"]
     for cat, a in top:
         L.append(f"  • {cat}: {100*a['vol24']/tot24:.1f}% of vol  (_{100*a['oi']/tot_oi:.1f}% of open interest_)")
+    if dune_lines:
+        L += [""] + dune_lines
     L += [
         "",
         "_Volume is contract count (notional double-counts both sides; not fee revenue). "
@@ -200,7 +201,10 @@ def main():
     p.add_argument("--reporting-app", default="Kalshi Investor Pulse")
     p.add_argument("--history", default=DEFAULT_HISTORY, help="Snapshot history JSON path")
     p.add_argument("--block-pages", type=int, default=120,
-                   help="Max 1000-trade pages to sample for block share (~0 to skip)")
+                   help="Max 1000-trade pages to sample for block share (0 to skip)")
+    p.add_argument("--dune", action="store_true",
+                   help="Append Dune full-history metrics (needs DUNE_API_KEY). "
+                        "Auto-enabled when DUNE_API_KEY is set.")
     p.add_argument("--send", action="store_true", help="Actually POST. Omit for dry run.")
     args = p.parse_args()
 
@@ -209,11 +213,19 @@ def main():
     win = volume_windows(cur, snaps)
     block = sample_block_share(args.block_pages) if args.block_pages > 0 else None
 
+    dune_lines = None
+    if args.dune or os.environ.get("DUNE_API_KEY"):
+        try:
+            import dune_client
+            dune_lines = dune_client.build_dune_lines()
+        except Exception as e:
+            print(f"[dune] skipped: {e}")
+
     # persist this run's snapshot for future WoW/MoM diffs
     snaps.append({k: cur[k] for k in ("ts", "iso", "total_vol", "vol24", "oi")})
     save_history(args.history, snaps)
 
-    msg = build_message(cur, cats, win, block)
+    msg = build_message(cur, cats, win, block, dune_lines)
     payload = make_payload(msg, args.channel, args.reporting_app)
 
     print("=== RENDERED MESSAGE PREVIEW ===")

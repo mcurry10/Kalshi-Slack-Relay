@@ -36,4 +36,7 @@ jobs:
         env:
           SLACK_RELAY_TOKEN: ${{ secrets.SLACK_RELAY_TOKEN }}
           SLACK_CHANNEL_ID:  ${{ secrets.SLACK_CHANNEL_ID }}
+          # Optional: set this repo secret to append Dune full-history parity
+          # metrics. If unset, the Dune section is silently skipped.
+          DUNE_API_KEY:      ${{ secrets.DUNE_API_KEY }}
         run: python3 slack_relay.py --channel "$SLACK_CHANNEL_ID" --send
