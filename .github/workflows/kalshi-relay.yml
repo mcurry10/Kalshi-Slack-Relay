@@ -1,14 +1,15 @@
 name: Kalshi Investor Pulse -> Slack
 
 # Manual trigger only for now — hit "Run workflow" in the Actions tab to test.
-# (Add a `schedule:` block here later if you want it to post automatically.)
+# (Add a `schedule:` block here later to post automatically; WoW/MoM history
+#  builds fastest with at least weekly runs — the cache is evicted after 7 days idle.)
 on:
   workflow_dispatch: {}
 
 jobs:
   relay:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,6 +21,16 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      # Snapshot history for WoW/MoM diffs. Unique key each run + prefix restore-keys
+      # => always restore the latest prior history, then save an updated one.
+      - name: Restore snapshot history
+        uses: actions/cache@v4
+        with:
+          path: config/kalshi_snapshot_history.json
+          key: kalshi-hist-${{ github.run_id }}
+          restore-keys: |
+            kalshi-hist-
 
       - name: Pull Kalshi data and post to Slack
         env:
