@@ -1,0 +1,21 @@
+name: Dune probe (which panels are public)
+
+# One-off diagnostic: lists every dune.com/kalshi/kalshi panel as PUBLIC (readable
+# by our key) or private/unavailable. Run from the Actions tab, then read the log.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Probe Dune queries
+        env:
+          DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
+        run: python3 dune_client.py

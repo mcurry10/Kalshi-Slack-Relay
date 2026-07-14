@@ -68,20 +68,42 @@ def _first_number(row):
     return None
 
 
-# ---- curated headline metrics (query_id, label, kind) ----
+# ---- curated headline metrics (public dashboard queries only) ----
+# Only queries the dashboard owner left PUBLIC are readable by our key.
+# The big cumulative/OI/volume panels are private (API returns 404), so they're
+# intentionally omitted here. See ALL_QUERIES below to re-probe what's public.
 SCALARS = [
-    (6171395, "Cumulative volume",          "$"),
-    (6171404, "Current open interest",      "$"),
-    (6357087, "Latest day volume",          "$"),
-    (6357086, "Latest day transactions",    "#"),
-    (6171396, "Cumulative trades",          "#"),
-    (6320047, "Avg trade size",             "$"),
-    (6320060, "Median trade size",          "$"),
+    (6320047, "Avg trade size",   "$"),
+    (6320060, "Median trade size", "$"),
 ]
 TABLES = [
-    (6315442, "Cumulative volume by category", "$", 5),
-    (6219452, "Top markets — 7d volume",       "$", 5),
+    (6219404, "Top markets \u2014 24h volume",    "$", 5),
+    (6219452, "Top markets \u2014 7d volume",     "$", 5),
+    (6219464, "Top markets \u2014 24h OI change", "$", 5),
+    (6219494, "Top markets \u2014 7d OI change",  "$", 5),
 ]
+
+# Every panel on dune.com/kalshi/kalshi, for re-probing public vs private.
+ALL_QUERIES = {
+    6357165: "Cumulative Combos Transactions", 6320060: "Median Trade Size",
+    6219464: "Top 10 Markets by 24hr OI Change", 6171358: "Open Interest by Category",
+    6171388: "Monthly Volume by Category", 6357167: "Cumulative Combos Transactions by Category",
+    6319933: "Weekly Combos Volume", 6357208: "Monthly Combos Transactions",
+    6319929: "Daily Combos Volume", 6320047: "Average Trade Size",
+    6171391: "Monthly Transactions by Category", 6319950: "Cumulative Combos Volume",
+    6315464: "Current Open Interest by Category", 6171373: "Daily Volume by Category",
+    6357161: "Daily Combos Transactions", 6320065: "Median Trade Size by Category",
+    6357201: "Weekly Combos Transactions", 6320062: "Average Trade Size by Category",
+    6357087: "Most Recent Day's Volume", 6315458: "Open Interest (line)",
+    6171386: "Weekly Volume by Category", 6171395: "Cumulative Volume",
+    6357086: "Most Recent Day's Transactions", 6171379: "Daily Transactions by Category",
+    6171392: "Weekly Transactions by Category", 6357152: "Cumulative Combos Volume by Category",
+    6171396: "Cumulative Trades", 6219452: "Top 10 Markets by Volume Last 7d",
+    6315454: "Cumulative Trades by Category", 6171404: "Current Open Interest",
+    6219404: "Top 10 Markets by Volume Last 24hr", 6219494: "Top 10 Markets by 7d OI Change",
+    6319938: "Monthly Combos Volume", 6315442: "Cumulative Volume by Category",
+    6171396: "Cumulative Trades",
+}
 
 
 def build_dune_lines():
@@ -119,8 +141,17 @@ def build_dune_lines():
 
 
 if __name__ == "__main__":
-    # Diagnostic: dump raw rows for each configured query so schemas/errors are visible.
-    for qid, label, *_ in SCALARS + TABLES:
-        print(f"\n=== {label} (query {qid}) ===")
-        print(json.dumps(latest_results(qid, limit=3), indent=2, default=str)[:900])
+    # Probe every dashboard query: PUBLIC (with a sample value) vs private/error.
+    pub, priv = [], []
+    for qid, name in sorted(ALL_QUERIES.items(), key=lambda kv: kv[1]):
+        res = latest_results(qid, limit=1)
         time.sleep(0.6)
+        if "error" in res:
+            priv.append((name, qid, res["error"]))
+            print(f"[private/err] {name} ({qid}): {res['error']}")
+        else:
+            rows = res["rows"]
+            v = _first_number(rows[0]) if rows else None
+            print(f"[PUBLIC]      {name} ({qid}): {rows[0] if rows else 'empty'}")
+            pub.append((name, qid))
+    print(f"\n{len(pub)} public, {len(priv)} private/unavailable")
