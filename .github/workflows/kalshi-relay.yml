@@ -1,42 +1,42 @@
 name: Kalshi Investor Pulse -> Slack
 
-# Manual trigger only for now — hit "Run workflow" in the Actions tab to test.
-# (Add a `schedule:` block here later to post automatically; WoW/MoM history
-#  builds fastest with at least weekly runs — the cache is evicted after 7 days idle.)
+# Weekly digest. WoW/MoM history + trade-flow state persist by being committed
+# back into the repo (see the "Persist" step), so they survive any gap.
 on:
+  schedule:
+    - cron: "0 14 * * 1"   # Mondays 14:00 UTC (~7:00 AM PT)
   workflow_dispatch: {}
+
+permissions:
+  contents: write
 
 jobs:
   relay:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      # Snapshot history for WoW/MoM diffs. Unique key each run + prefix restore-keys
-      # => always restore the latest prior history, then save an updated one.
-      - name: Restore snapshot history
-        uses: actions/cache@v4
-        with:
-          path: config/kalshi_snapshot_history.json
-          key: kalshi-hist-${{ github.run_id }}
-          restore-keys: |
-            kalshi-hist-
+      - run: pip install -r requirements.txt
 
       - name: Pull Kalshi data and post to Slack
         env:
           SLACK_RELAY_TOKEN: ${{ secrets.SLACK_RELAY_TOKEN }}
           SLACK_CHANNEL_ID:  ${{ secrets.SLACK_CHANNEL_ID }}
-          # Optional: set this repo secret to append Dune full-history parity
-          # metrics. If unset, the Dune section is silently skipped.
           DUNE_API_KEY:      ${{ secrets.DUNE_API_KEY }}
         run: python3 slack_relay.py --channel "$SLACK_CHANNEL_ID" --send
+
+      - name: Persist snapshot history
+        run: |
+          git config user.name  "kalshi-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add config/kalshi_snapshot_history.json
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: update WoW/MoM snapshot history [skip ci]"
+            for i in 1 2 3; do
+              git pull --rebase --autostash origin main || true
+              git push && break || sleep 5
+            done
+          fi
