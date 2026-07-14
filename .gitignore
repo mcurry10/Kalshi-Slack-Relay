@@ -1,0 +1,8 @@
+# Never commit secrets
+config/secrets.env
+*.env
+__pycache__/
+*.pyc
+
+# Kalshi snapshot state (large; use CI cache/artifact, not git)
+config/kalshi_snapshot*.json
