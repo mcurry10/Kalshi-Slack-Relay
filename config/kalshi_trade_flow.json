@@ -1,13 +1,13 @@
 {
 "days": {
 "2026-07-15": {
-"total_usd": 11636348.311990073,
+"total_usd": 16232619.881870098,
 "block_usd": 0.0,
-"large_usd": 3137587.4814100005,
-"n_trades": 240000,
+"large_usd": 4038122.266390001,
+"n_trades": 360000,
 "n_block": 0,
-"n_large": 1280,
-"sample_min": 72.8726216
+"n_large": 1671,
+"sample_min": 90.65961186666667
 }
 },
 "threshold": 1000.0
