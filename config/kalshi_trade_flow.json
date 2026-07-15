@@ -1,1 +1,14 @@
-{"days": {}, "threshold": 1000.0}
+{
+"days": {
+"2026-07-15": {
+"total_usd": 5463078.195230095,
+"block_usd": 0.0,
+"large_usd": 1420663.96479,
+"n_trades": 120000,
+"n_block": 0,
+"n_large": 625,
+"sample_min": 53.95855853333333
+}
+},
+"threshold": 1000.0
+}
