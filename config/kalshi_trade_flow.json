@@ -28,13 +28,13 @@
 "sample_min": 109.8858351
 },
 "2026-07-18": {
-"total_usd": 8955938.818359854,
+"total_usd": 14952841.690339837,
 "block_usd": 0.0,
-"large_usd": 2113126.33735,
-"n_trades": 240000,
+"large_usd": 4020153.3557300004,
+"n_trades": 360000,
 "n_block": 0,
-"n_large": 814,
-"sample_min": 75.34294270000001
+"n_large": 1507,
+"sample_min": 96.3492872
 }
 },
 "threshold": 1000.0
