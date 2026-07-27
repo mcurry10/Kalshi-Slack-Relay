@@ -4,7 +4,7 @@ name: Kalshi Investor Pulse -> Slack
 # back into the repo (see the "Persist" step), so they survive any gap.
 on:
   schedule:
-    - cron: "0 14 * * 1"   # Mondays 14:00 UTC (~7:00 AM PT)
+    - cron: "23 11 * * 1"   # Mondays 11:23 UTC (~4:23 AM PT); off-peak minute since GitHub cron fires late
   workflow_dispatch: {}
 
 permissions:
