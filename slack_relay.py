@@ -274,7 +274,7 @@ def main():
         sys.exit("\nERROR: --send given but SLACK_RELAY_TOKEN is not set. Refusing to send.")
     r = requests.post(RELAY_URL, headers={"Authorization": token, "Content-Type": "application/json"},
                       json=payload, timeout=30)
-    print(f"\nPOST status: {r.status_code}  (relay fails silently on bad payload — verify in Slack)")
+    print(f"\nPOST status: {r.status_code}"); r.raise_for_status()  # fail the run if the relay rejects the POST
 
 
 if __name__ == "__main__":
