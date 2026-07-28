@@ -1,17 +1,22 @@
 """
-Kalshi investor pulse -> Anthos Slack Log Relay.
+Kalshi Weekly Market Digest -> Anthos Slack Log Relay.
 
-From Kalshi's PUBLIC market-data API (no auth):
-  - Platform pulse: open events/markets, open interest, 24h volume, top categories.
-  - WoW / MoM volume: exact trailing ~7d / ~30d contract volume, by diffing this
-    run's lifetime volume against stored snapshots (config/kalshi_snapshot_history.json).
-  - Institutional flow: large-trade & block-trade share of taker $ volume, read from
-    accumulated samples in config/kalshi_trade_flow.json (populated by trade_collector.py).
-    Falls back to a small live sample if the collector has no data yet.
-Optionally appends full-history parity metrics from the public Kalshi Dune dashboard
-when DUNE_API_KEY is set.
+Built from Kalshi's PUBLIC market-data API (no auth):
+  - Market activity: open interest and 24-hour volume, in notional dollars and
+    contracts, with WoW / MoM changes computed from stored weekly snapshots
+    (config/kalshi_snapshot_history.json). These are point-in-time comparisons
+    (this Monday vs prior Mondays), which stay valid as markets settle.
+  - Trade size: exchange-lifetime average and median from the public Kalshi
+    Dune dashboard (requires DUNE_API_KEY), trended WoW / MoM from our stored
+    snapshots since the public queries expose no time series.
+  - Institutional activity: share of dollar volume from trades >= $1,000,
+    read from accumulated samples in config/kalshi_trade_flow.json
+    (populated every few hours by trade_collector.py).
+  - Category mix and most-active-market tables, with series tickers resolved
+    to human-readable titles via the Kalshi series endpoint.
 
-Dry run by default; POST only with --send. Channel is a required arg. Token from env.
+Formatting follows balance-sheet conventions: negative values in parentheses.
+Dry run by default; POST only with --send. Channel is a required arg.
 """
 import os, sys, json, time, argparse, requests
 from collections import defaultdict
@@ -26,6 +31,7 @@ S = requests.Session()
 S.headers.update({"Accept": "application/json"})
 
 
+# ---- live platform pull ----
 def pull_platform(max_pages=400):
     cursor, events = None, []
     for _ in range(max_pages):
@@ -61,7 +67,24 @@ def pull_platform(max_pages=400):
     }, cats
 
 
-# ---- institutional flow ----
+def series_title(ticker, _cache={}):
+    """Human-readable title for a Kalshi series ticker; falls back to the ticker."""
+    t = str(ticker or "").strip()
+    if not t or " " in t:
+        return t
+    if t in _cache:
+        return _cache[t]
+    title = t
+    try:
+        d = S.get(f"{BASE}/series/{t}", timeout=15).json()
+        title = (d.get("series") or {}).get("title") or t
+    except Exception:
+        pass
+    _cache[t] = title
+    return title
+
+
+# ---- institutional flow (accumulated by trade_collector.py) ----
 def load_flow(path):
     try:
         with open(path) as f:
@@ -75,7 +98,7 @@ def flow_windows(flow, windows=(7, 30)):
     today = datetime.now(timezone.utc).date()
     out = {}
     for w in windows:
-        tot = blk = lrg = smin = 0.0
+        tot = lrg = smin = 0.0
         nd = 0
         for dstr, d in days.items():
             try:
@@ -83,44 +106,11 @@ def flow_windows(flow, windows=(7, 30)):
             except ValueError:
                 continue
             if 0 <= (today - dd).days < w:
-                tot += d["total_usd"]; blk += d["block_usd"]; lrg += d["large_usd"]
+                tot += d["total_usd"]; lrg += d["large_usd"]
                 smin += d.get("sample_min", 0.0); nd += 1
         out[w] = {"total": tot, "n_days": nd, "sample_min": smin,
-                  "block_share": (blk / tot if tot else None),
                   "large_share": (lrg / tot if tot else None)}
     return out
-
-
-def live_sample(max_pages, threshold):
-    """Fallback only: small live sample if the collector has no data yet."""
-    trades, cursor = [], None
-    for _ in range(max_pages):
-        p = {"limit": 1000}
-        if cursor:
-            p["cursor"] = cursor
-        d = S.get(f"{BASE}/markets/trades", params=p, timeout=30).json()
-        b = d.get("trades", [])
-        trades += b
-        cursor = d.get("cursor")
-        if not cursor or not b:
-            break
-    if not trades:
-        return None
-    tot = blk = lrg = 0.0
-    for t in trades:
-        price = float(t["yes_price_dollars"] if t["taker_side"] == "yes" else t["no_price_dollars"])
-        usd = float(t["count_fp"]) * price
-        tot += usd
-        if t.get("is_block_trade"):
-            blk += usd
-        if usd >= threshold:
-            lrg += usd
-    times = sorted(t["created_time"] for t in trades)
-    span = (datetime.fromisoformat(times[-1].replace("Z", "+00:00"))
-            - datetime.fromisoformat(times[0].replace("Z", "+00:00"))).total_seconds() / 60
-    return {"n": len(trades), "span_min": span,
-            "block_share": blk / tot if tot else 0.0,
-            "large_share": lrg / tot if tot else 0.0}
 
 
 # ---- snapshot history (WoW / MoM) ----
@@ -149,117 +139,168 @@ def nearest(snaps, now_ts, target_days, min_days, max_days):
     return min(cands, key=lambda s: abs(s["ts"] - tgt))
 
 
-def volume_windows(cur, snaps):
+def pct_change(cur_v, prev_v):
+    try:
+        if cur_v is None or prev_v is None or float(prev_v) == 0.0:
+            return None
+        return 100.0 * (float(cur_v) / float(prev_v) - 1.0)
+    except (TypeError, ValueError):
+        return None
+
+
+def snapshot_changes(cur, snaps, keys):
+    """Point-in-time WoW / MoM per key, vs snapshots ~7 and ~30 days back.
+    Each key is matched only against snapshots that recorded that key, so
+    metrics added later (e.g. trade size) trend as soon as they have history."""
     now = cur["ts"]
-    s7 = nearest(snaps, now, 7, 5, 10)
-    s14 = nearest(snaps, now, 14, 12, 18)
-    s30 = nearest(snaps, now, 30, 25, 38)
-    s60 = nearest(snaps, now, 60, 52, 70)
-    out = {"w7": None, "w30": None, "wow": None, "mom": None}
-    if s7:
-        out["w7"] = cur["total_vol"] - s7["total_vol"]
-        if s14:
-            prior = s7["total_vol"] - s14["total_vol"]
-            if prior > 0:
-                out["wow"] = 100 * (out["w7"] / prior - 1)
-    if s30:
-        out["w30"] = cur["total_vol"] - s30["total_vol"]
-        if s60:
-            prior = s30["total_vol"] - s60["total_vol"]
-            if prior > 0:
-                out["mom"] = 100 * (out["w30"] / prior - 1)
+    out = {}
+    for k in keys:
+        have = [s for s in snaps if s.get(k) is not None]
+        s7 = nearest(have, now, 7, 5, 10)
+        s30 = nearest(have, now, 30, 25, 38)
+        out[k] = {"wow": pct_change(cur.get(k), s7.get(k) if s7 else None),
+                  "mom": pct_change(cur.get(k), s30.get(k) if s30 else None)}
     return out
 
 
+# ---- formatting (balance-sheet conventions: negatives in parentheses) ----
+def fmt_pct(x, dp=1):
+    if x is None:
+        return "n/a"
+    s = f"{abs(x):,.{dp}f}%"
+    return f"({s})" if x < 0 else s
+
+
+def fmt_share(x, dp=1):
+    return "n/a" if x is None else f"{100.0 * x:,.{dp}f}%"
+
+
+def fmt_usd(x):
+    if x is None:
+        return "n/a"
+    neg, a = x < 0, abs(float(x))
+    if a >= 1e9:   s = f"${a/1e9:,.2f}B"
+    elif a >= 1e6: s = f"${a/1e6:,.1f}M"
+    elif a >= 1e3: s = f"${a/1e3:,.1f}K"
+    else:          s = f"${a:,.2f}"
+    return f"({s})" if neg else s
+
+
+def fmt_count(x):
+    if x is None:
+        return "n/a"
+    neg, a = x < 0, abs(float(x))
+    if a >= 1e9:   s = f"{a/1e9:,.2f}B"
+    elif a >= 1e6: s = f"{a/1e6:,.1f}M"
+    else:          s = f"{a:,.0f}"
+    return f"({s})" if neg else s
+
+
 # ---- message ----
-def _pct(x):
-    return f"{x*100:.1f}%" if x is not None else "n/a"
+def build_message(cur, cats, chg, fw, threshold, dune):
+    now = datetime.now(timezone.utc)
+    L = [
+        "*Kalshi Weekly Market Digest*",
+        f"{now.strftime('%A, %B %d, %Y')}  |  data as of {now.strftime('%H:%M')} UTC",
+        "",
+        "*Market activity*",
+    ]
 
+    def activity_line(label, contracts, key):
+        c = chg.get(key, {})
+        L.append(f"{label}: *{fmt_usd(contracts)}* notional "
+                 f"({fmt_count(contracts)} contracts)  |  "
+                 f"WoW {fmt_pct(c.get('wow'))}  |  MoM {fmt_pct(c.get('mom'))}")
 
-def build_message(cur, cats, win, fw, threshold, live, dune_lines=None):
+    activity_line("Open interest", cur["oi"], "oi")
+    activity_line("24-hour volume", cur["vol24"], "vol24")
+    L.append(f"Open markets: {cur['n_markets']:,} across {cur['n_events']:,} events")
+
+    if cur.get("avg_trade") is not None or cur.get("median_trade") is not None:
+        L += ["", "*Trade size (exchange lifetime)*"]
+        for label, key in (("Average trade", "avg_trade"), ("Median trade", "median_trade")):
+            v = cur.get(key)
+            if v is None:
+                continue
+            c = chg.get(key, {})
+            L.append(f"{label}: *${v:,.2f}*  |  "
+                     f"WoW {fmt_pct(c.get('wow'))}  |  MoM {fmt_pct(c.get('mom'))}")
+
+    if fw and any((fw[w]["total"] or 0) > 0 for w in fw):
+        L += ["", "*Institutional activity*"]
+        L.append(f"Trades of ${threshold:,.0f} or more: "
+                 f"*{fmt_share(fw[7]['large_share'])}* of dollar volume, trailing 7 days  |  "
+                 f"{fmt_share(fw[30]['large_share'])} trailing 30 days")
+
+    top = sorted(cats.items(), key=lambda kv: -kv[1]["vol24"])[:5]
     tot24 = cur["vol24"] or 1
     tot_oi = cur["oi"] or 1
-    top = sorted(cats.items(), key=lambda kv: -kv[1]["vol24"])[:5]
-    L = [
-        f"*Kalshi platform pulse*  —  {cur['n_events']:,} open events / {cur['n_markets']:,} markets",
-        f"Open interest: *{cur['oi']:,.0f}* contracts   |   24h volume: *{cur['vol24']:,.0f}* contracts",
-        "",
-        "*Volume traded (contracts):*",
-    ]
-    def _fmt(vol, pct, label):
-        if vol is None:
-            return f"  • {label}: _building history…_"
-        chg = f"  ({pct:+.1f}% vs prior period)" if pct is not None else "  (baseline)"
-        return f"  • {label}: *{vol:,.0f}*{chg}"
-    L.append(_fmt(win["w7"], win["wow"], "Trailing 7d (WoW)"))
-    L.append(_fmt(win["w30"], win["mom"], "Trailing 30d (MoM)"))
-    L.append("")
-
-    thr = f"${threshold:,.0f}"
-    if fw and any(fw[w]["total"] > 0 for w in fw):
-        L.append("*Institutional flow (accumulated samples):*")
-        L.append(f"  • Large trades (≥{thr}): 7d *{_pct(fw[7]['large_share'])}* of $   |   30d *{_pct(fw[30]['large_share'])}*")
-        L.append(f"  • Block trades: 7d *{_pct(fw[7]['block_share'])}*   |   30d *{_pct(fw[30]['block_share'])}*")
-        L.append(f"  _(~{fw[7]['sample_min']:.0f} min sampled across {fw[7]['n_days']}d for the 7d figure; block trades are rare on Kalshi)_")
-    elif live:
-        L.append(f"*Institutional flow (live ~{live['span_min']:.0f}-min sample):*  "
-                 f"large ≥{thr} *{_pct(live['large_share'])}*  |  block *{_pct(live['block_share'])}* of taker $")
-    else:
-        L.append("*Institutional flow:* _no data yet — will populate once the collector has run_")
-    L += ["", "*Top categories by 24h volume:*"]
+    L += ["", "*Category mix, share of 24-hour volume*"]
     for cat, a in top:
-        L.append(f"  • {cat}: {100*a['vol24']/tot24:.1f}% of vol  (_{100*a['oi']/tot_oi:.1f}% of open interest_)")
-    if dune_lines:
-        L += [""] + dune_lines
-    L += [
-        "",
-        "_Volume is contract count (notional double-counts both sides; not fee revenue). "
-        "WoW/MoM via snapshot diff; institutional flow via accumulated trade samples._",
-    ]
+        L.append(f"{cat}: {100*a['vol24']/tot24:,.1f}% of volume  |  "
+                 f"{100*a['oi']/tot_oi:,.1f}% of open interest")
+
+    if dune and dune.get("top_7d"):
+        L += ["", "*Most active markets, trailing 7 days*"]
+        for i, (name, v) in enumerate(dune["top_7d"], 1):
+            val = f": {fmt_usd(v)}" if v is not None else ""
+            L.append(f"{i}. {series_title(name)}{val}")
+
+    if dune and dune.get("top_oi_change"):
+        L += ["", "*Largest open-interest changes, trailing 24 hours*"]
+        for i, (name, v) in enumerate(dune["top_oi_change"], 1):
+            val = f": {fmt_usd(v)}" if v is not None else ""
+            L.append(f"{i}. {series_title(name)}{val}")
+
+    L += ["", ("_Notional equals contract count times the $1 settlement value and "
+               "reflects both sides' maximum payout, not premium dollars at risk. "
+               "WoW and MoM compare Monday snapshots; n/a indicates history is still "
+               "accumulating. Negative changes appear in parentheses. Institutional "
+               "share is measured from sampled public trade data (roughly two hours "
+               "per day of coverage). Trade-size figures are exchange-lifetime values. "
+               "Sources: Kalshi public API; dune.com/kalshi/kalshi._")]
     return "\n".join(L)
 
 
 def make_payload(message, channel, reporting_app):
     return {"message": message, "channelID": channel, "reportingApp": reporting_app,
-            "headline": "Kalshi Investor Pulse", "icon_emoji": ":chart_with_upwards_trend:"}
+            "headline": "Kalshi Weekly Market Digest", "icon_emoji": ":bar_chart:"}
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--channel", required=True)
-    p.add_argument("--reporting-app", default="Kalshi Investor Pulse")
+    p.add_argument("--reporting-app", default="Kalshi Weekly Market Digest")
     p.add_argument("--history", default=DEFAULT_HISTORY)
     p.add_argument("--flow", default=DEFAULT_FLOW)
-    p.add_argument("--threshold", type=float, default=1000.0, help="Large-trade $ threshold (fallback only)")
-    p.add_argument("--fallback-pages", type=int, default=20,
-                   help="Live trade pages if flow file is empty (0 to disable)")
-    p.add_argument("--dune", action="store_true", help="Append Dune metrics (auto if DUNE_API_KEY set)")
     p.add_argument("--send", action="store_true")
     args = p.parse_args()
 
     cur, cats = pull_platform()
+
+    dune = None
+    if os.environ.get("DUNE_API_KEY"):
+        try:
+            import dune_client
+            dune = dune_client.get_metrics()
+        except Exception as e:
+            print(f"[dune] skipped: {e}")
+    cur["avg_trade"] = (dune or {}).get("avg_trade")
+    cur["median_trade"] = (dune or {}).get("median_trade")
+
     snaps = load_history(args.history)
-    win = volume_windows(cur, snaps)
+    chg = snapshot_changes(cur, snaps, ("oi", "vol24", "avg_trade", "median_trade"))
 
     flow = load_flow(args.flow)
     fw = flow_windows(flow)
-    threshold = flow.get("threshold", args.threshold)
-    live = None
-    if not any(fw[w]["total"] > 0 for w in fw) and args.fallback_pages > 0:
-        live = live_sample(args.fallback_pages, threshold)
+    threshold = flow.get("threshold", 1000.0)
 
-    dune_lines = None
-    if args.dune or os.environ.get("DUNE_API_KEY"):
-        try:
-            import dune_client
-            dune_lines = dune_client.build_dune_lines()
-        except Exception as e:
-            print(f"[dune] skipped: {e}")
-
-    snaps.append({k: cur[k] for k in ("ts", "iso", "total_vol", "vol24", "oi")})
+    snaps.append({k: cur.get(k) for k in ("ts", "iso", "total_vol", "vol24", "oi",
+                                          "n_events", "n_markets",
+                                          "avg_trade", "median_trade")})
     save_history(args.history, snaps)
 
-    msg = build_message(cur, cats, win, fw, threshold, live, dune_lines)
+    msg = build_message(cur, cats, chg, fw, threshold, dune)
     payload = make_payload(msg, args.channel, args.reporting_app)
 
     print("=== RENDERED MESSAGE PREVIEW ===")
@@ -274,7 +315,8 @@ def main():
         sys.exit("\nERROR: --send given but SLACK_RELAY_TOKEN is not set. Refusing to send.")
     r = requests.post(RELAY_URL, headers={"Authorization": token, "Content-Type": "application/json"},
                       json=payload, timeout=30)
-    print(f"\nPOST status: {r.status_code}"); r.raise_for_status()  # fail the run if the relay rejects the POST
+    print(f"\nPOST status: {r.status_code}")
+    r.raise_for_status()  # fail the run if the relay rejects the POST
 
 
 if __name__ == "__main__":

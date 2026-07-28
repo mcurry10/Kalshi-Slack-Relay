@@ -5,11 +5,20 @@ Reads the LATEST cached results of a query by ID via
 which is cheap and does not re-execute. Credentials come from env DUNE_API_KEY.
 
 Query IDs are taken straight from the public Kalshi dashboard
-(https://dune.com/kalshi/kalshi) — each panel links to /queries/<id>.
+(https://dune.com/kalshi/kalshi) - each panel links to /queries/<id>.
+Only queries the dashboard owner left public are readable by our key; the big
+cumulative/OI/volume panels are private (API returns 404). Run this file
+directly to re-probe which panels are public.
 """
 import os, json, time, urllib.request, urllib.error, urllib.parse
 
 API = "https://api.dune.com/api/v1"
+
+# Public dashboard queries used by the weekly digest.
+QUERY_AVG_TRADE = 6320047      # Average Trade Size (exchange lifetime, scalar)
+QUERY_MEDIAN_TRADE = 6320060   # Median Trade Size (exchange lifetime, scalar)
+QUERY_TOP_7D = 6219452         # Top 10 Markets by Volume Last 7d
+QUERY_TOP_OI_CHANGE = 6219464  # Top 10 Markets by 24hr OI Change
 
 
 def _key():
@@ -43,22 +52,6 @@ def latest_results(query_id, limit=20, retries=4):
     return {"error": "rate-limited"}
 
 
-# ---- formatting helpers ----
-def _money(x):
-    x = float(x); a = abs(x)
-    if a >= 1e9:  return f"${x/1e9:.1f}B"
-    if a >= 1e6:  return f"${x/1e6:.1f}M"
-    if a >= 1e3:  return f"${x/1e3:.1f}K"
-    return f"${x:,.2f}"
-
-
-def _count(x):
-    x = float(x); a = abs(x)
-    if a >= 1e9:  return f"{x/1e9:.2f}B"
-    if a >= 1e6:  return f"{x/1e6:.1f}M"
-    return f"{x:,.0f}"
-
-
 def _first_number(row):
     for v in row.values():
         try:
@@ -68,18 +61,38 @@ def _first_number(row):
     return None
 
 
-# ---- curated headline metrics (public dashboard queries only) ----
-# Only queries the dashboard owner left PUBLIC are readable by our key.
-# The big cumulative/OI/volume panels are private (API returns 404), so they're
-# intentionally omitted here. See ALL_QUERIES below to re-probe what's public.
-SCALARS = [
-    (6320047, "Avg trade size",    "$"),
-    (6320060, "Median trade size", "$"),
-]
-TABLES = [
-    (6219452, "Top markets \u2014 7d volume",     "$", 5),
-    (6219464, "Top markets \u2014 24h OI change", "$", 5),
-]
+def get_scalar(query_id):
+    """First numeric value of the first row, or None."""
+    res = latest_results(query_id, limit=1)
+    time.sleep(0.6)  # space out calls to dodge free-tier throttling
+    if "error" in res or not res.get("rows"):
+        return None
+    return _first_number(res["rows"][0])
+
+
+def get_table(query_id, n=5):
+    """List of (name, value) from the first n rows; name = first column."""
+    res = latest_results(query_id, limit=n)
+    time.sleep(0.6)
+    if "error" in res or not res.get("rows"):
+        return []
+    out = []
+    for row in res["rows"][:n]:
+        vals = list(row.values())
+        name = str(vals[0]) if vals else "?"
+        out.append((name, _first_number(row)))
+    return out
+
+
+def get_metrics():
+    """All Dune inputs the weekly digest uses, fetched in one place."""
+    return {
+        "avg_trade": get_scalar(QUERY_AVG_TRADE),
+        "median_trade": get_scalar(QUERY_MEDIAN_TRADE),
+        "top_7d": get_table(QUERY_TOP_7D, 5),
+        "top_oi_change": get_table(QUERY_TOP_OI_CHANGE, 5),
+    }
+
 
 # Every panel on dune.com/kalshi/kalshi, for re-probing public vs private.
 ALL_QUERIES = {
@@ -100,42 +113,7 @@ ALL_QUERIES = {
     6315454: "Cumulative Trades by Category", 6171404: "Current Open Interest",
     6219404: "Top 10 Markets by Volume Last 24hr", 6219494: "Top 10 Markets by 7d OI Change",
     6319938: "Monthly Combos Volume", 6315442: "Cumulative Volume by Category",
-    6171396: "Cumulative Trades",
 }
-
-
-def build_dune_lines():
-    """Return Slack mrkdwn lines for the Dune-sourced parity section."""
-    lines = ["*— Dune (full-history parity) —*"]
-    for qid, label, kind in SCALARS:
-        res = latest_results(qid, limit=1)
-        time.sleep(0.6)  # space out calls to dodge free-tier throttling
-        if "error" in res:
-            lines.append(f"  • {label}: _n/a ({res['error']})_")
-            continue
-        rows = res["rows"]
-        v = _first_number(rows[0]) if rows else None
-        val = "_n/a (empty)_" if v is None else (_money(v) if kind == "$" else _count(v))
-        lines.append(f"  • {label}: *{val}*")
-    for qid, label, kind, n in TABLES:
-        res = latest_results(qid, limit=n)
-        time.sleep(0.6)
-        if "error" in res:
-            lines.append(f"  • {label}: _n/a ({res['error']})_")
-            continue
-        rows = res["rows"]
-        if not rows:
-            lines.append(f"  • {label}: _n/a (empty)_")
-            continue
-        lines.append(f"  *{label}:*")
-        for row in rows[:n]:
-            vals = list(row.values())
-            name = str(vals[0]) if vals else "?"
-            num = _first_number(row)
-            shown = "" if num is None else ("  " + (_money(num) if kind == "$" else _count(num)))
-            lines.append(f"    · {name}{shown}")
-    lines.append("Source: dune.com/kalshi/kalshi (full trade-level history).")
-    return lines
 
 
 if __name__ == "__main__":
@@ -149,7 +127,6 @@ if __name__ == "__main__":
             print(f"[private/err] {name} ({qid}): {res['error']}")
         else:
             rows = res["rows"]
-            v = _first_number(rows[0]) if rows else None
             print(f"[PUBLIC]      {name} ({qid}): {rows[0] if rows else 'empty'}")
             pub.append((name, qid))
     print(f"\n{len(pub)} public, {len(priv)} private/unavailable")
