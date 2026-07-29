@@ -9,11 +9,11 @@ Built from Kalshi's PUBLIC market-data API (no auth):
   - Trade size: exchange-lifetime average and median from the public Kalshi
     Dune dashboard (requires DUNE_API_KEY), trended WoW / MoM from our stored
     snapshots since the public queries expose no time series.
-  - Institutional activity: share of dollar volume from trades >= $1,000,
-    read from accumulated samples in config/kalshi_trade_flow.json
-    (populated every few hours by trade_collector.py).
   - Category mix and most-active-market tables, with series tickers resolved
     to human-readable titles via the Kalshi series endpoint.
+
+Kalshi contracts settle at $1, so one contract equals $1 of notional value;
+dollar figures in the digest are notional on that basis.
 
 Formatting follows balance-sheet conventions: negative values in parentheses.
 Dry run by default; POST only with --send. Channel is a required arg.
@@ -25,7 +25,6 @@ from datetime import datetime, timezone
 RELAY_URL = "https://647891eb-2a47-4a3b-ac32-bb8df7ee4b8c.trayapp.io"
 BASE = "https://api.elections.kalshi.com/trade-api/v2"
 DEFAULT_HISTORY = "config/kalshi_snapshot_history.json"
-DEFAULT_FLOW = "config/kalshi_trade_flow.json"
 
 S = requests.Session()
 S.headers.update({"Accept": "application/json"})
@@ -82,35 +81,6 @@ def series_title(ticker, _cache={}):
         pass
     _cache[t] = title
     return title
-
-
-# ---- institutional flow (accumulated by trade_collector.py) ----
-def load_flow(path):
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"days": {}}
-
-
-def flow_windows(flow, windows=(7, 30)):
-    days = flow.get("days", {})
-    today = datetime.now(timezone.utc).date()
-    out = {}
-    for w in windows:
-        tot = lrg = smin = 0.0
-        nd = 0
-        for dstr, d in days.items():
-            try:
-                dd = datetime.fromisoformat(dstr).date()
-            except ValueError:
-                continue
-            if 0 <= (today - dd).days < w:
-                tot += d["total_usd"]; lrg += d["large_usd"]
-                smin += d.get("sample_min", 0.0); nd += 1
-        out[w] = {"total": tot, "n_days": nd, "sample_min": smin,
-                  "large_share": (lrg / tot if tot else None)}
-    return out
 
 
 # ---- snapshot history (WoW / MoM) ----
@@ -171,10 +141,6 @@ def fmt_pct(x, dp=1):
     return f"({s})" if x < 0 else s
 
 
-def fmt_share(x, dp=1):
-    return "n/a" if x is None else f"{100.0 * x:,.{dp}f}%"
-
-
 def fmt_usd(x):
     if x is None:
         return "n/a"
@@ -186,18 +152,8 @@ def fmt_usd(x):
     return f"({s})" if neg else s
 
 
-def fmt_count(x):
-    if x is None:
-        return "n/a"
-    neg, a = x < 0, abs(float(x))
-    if a >= 1e9:   s = f"{a/1e9:,.2f}B"
-    elif a >= 1e6: s = f"{a/1e6:,.1f}M"
-    else:          s = f"{a:,.0f}"
-    return f"({s})" if neg else s
-
-
 # ---- message ----
-def build_message(cur, cats, chg, fw, threshold, dune):
+def build_message(cur, cats, chg, dune):
     now = datetime.now(timezone.utc)
     L = [
         "*Kalshi Weekly Market Digest*",
@@ -206,10 +162,9 @@ def build_message(cur, cats, chg, fw, threshold, dune):
         "*Market activity*",
     ]
 
-    def activity_line(label, contracts, key):
+    def activity_line(label, value, key):
         c = chg.get(key, {})
-        L.append(f"{label}: *{fmt_usd(contracts)}* notional "
-                 f"({fmt_count(contracts)} contracts)  |  "
+        L.append(f"{label}: *{fmt_usd(value)}* notional  |  "
                  f"WoW {fmt_pct(c.get('wow'))}  |  MoM {fmt_pct(c.get('mom'))}")
 
     activity_line("Open interest", cur["oi"], "oi")
@@ -225,12 +180,6 @@ def build_message(cur, cats, chg, fw, threshold, dune):
             c = chg.get(key, {})
             L.append(f"{label}: *${v:,.2f}*  |  "
                      f"WoW {fmt_pct(c.get('wow'))}  |  MoM {fmt_pct(c.get('mom'))}")
-
-    if fw and any((fw[w]["total"] or 0) > 0 for w in fw):
-        L += ["", "*Institutional activity*"]
-        L.append(f"Trades of ${threshold:,.0f} or more: "
-                 f"*{fmt_share(fw[7]['large_share'])}* of dollar volume, trailing 7 days  |  "
-                 f"{fmt_share(fw[30]['large_share'])} trailing 30 days")
 
     top = sorted(cats.items(), key=lambda kv: -kv[1]["vol24"])[:5]
     tot24 = cur["vol24"] or 1
@@ -252,13 +201,11 @@ def build_message(cur, cats, chg, fw, threshold, dune):
             val = f": {fmt_usd(v)}" if v is not None else ""
             L.append(f"{i}. {series_title(name)}{val}")
 
-    L += ["", ("_Notional equals contract count times the $1 settlement value and "
-               "reflects both sides' maximum payout, not premium dollars at risk. "
-               "WoW and MoM compare Monday snapshots; n/a indicates history is still "
-               "accumulating. Negative changes appear in parentheses. Institutional "
-               "share is measured from sampled public trade data (roughly two hours "
-               "per day of coverage). Trade-size figures are exchange-lifetime values. "
-               "Sources: Kalshi public API; dune.com/kalshi/kalshi._")]
+    L += ["", ("_Dollar figures are notional: Kalshi contracts settle at $1, so one "
+               "contract equals $1 of notional value. WoW and MoM compare Monday "
+               "snapshots; n/a indicates history is still accumulating. Negative "
+               "changes appear in parentheses. Trade-size figures are exchange-lifetime "
+               "values. Sources: Kalshi public API; dune.com/kalshi/kalshi._")]
     return "\n".join(L)
 
 
@@ -272,7 +219,6 @@ def main():
     p.add_argument("--channel", required=True)
     p.add_argument("--reporting-app", default="Kalshi Weekly Market Digest")
     p.add_argument("--history", default=DEFAULT_HISTORY)
-    p.add_argument("--flow", default=DEFAULT_FLOW)
     p.add_argument("--send", action="store_true")
     args = p.parse_args()
 
@@ -291,21 +237,17 @@ def main():
     snaps = load_history(args.history)
     chg = snapshot_changes(cur, snaps, ("oi", "vol24", "avg_trade", "median_trade"))
 
-    flow = load_flow(args.flow)
-    fw = flow_windows(flow)
-    threshold = flow.get("threshold", 1000.0)
-
     snaps.append({k: cur.get(k) for k in ("ts", "iso", "total_vol", "vol24", "oi",
                                           "n_events", "n_markets",
                                           "avg_trade", "median_trade")})
     save_history(args.history, snaps)
 
-    msg = build_message(cur, cats, chg, fw, threshold, dune)
+    msg = build_message(cur, cats, chg, dune)
     payload = make_payload(msg, args.channel, args.reporting_app)
 
     print("=== RENDERED MESSAGE PREVIEW ===")
     print(msg)
-    print(f"\n[history] {len(snaps)} snapshot(s) | [flow] {len(flow.get('days', {}))} day(s)")
+    print(f"\n[history] {len(snaps)} snapshot(s)")
 
     if not args.send:
         print("\n[dry run] Nothing sent. Re-run with --send (and SLACK_RELAY_TOKEN set) to post.")
